@@ -29,10 +29,10 @@ def _mqtt_client():
 def on_message(client, userdata, msg):
     data = json.loads(msg.payload.decode())
 
-    fl = data["fl"]            # distance to the left side wall (m)
-    fr = data["fr"]            # distance to the right side wall (m)
-    sl = data["sl"]            # distance ahead, left of centre (m)
-    sr = data["sr"]            # distance ahead, right of centre (m)
+    fl = data["fl"]            # Front-left ToF distance readings
+    fr = data["fr"]            # Front-right ToF distance readings
+    sl = data["sl"]            # Side-left ToF distance readings 
+    sr = data["sr"]            # Side-right ToF distance readings 
     yaw_rate = data["gyro"][2]  # rad/s about z
     dt = data["dt"]            # s, simulator timestep
 
