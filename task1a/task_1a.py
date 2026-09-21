@@ -86,11 +86,139 @@ HEADING_DELTA = {
 # ============================================================================
 # YOUR ALGORITHM GOES HERE. Everything above and below is plumbing.
 # ============================================================================
+import heapq
+
+# yaw the bot must face to leave through an exit
+_EXIT_YAW = {'east': 0.0, 'north': 90.0, 'west': 180.0, 'south': 270.0}
+
+# (desired_yaw - current_yaw) mod 360  ->  relative command
+# yaw grows counter-clockwise (EAST=0 -> NORTH=90), so +90 is a LEFT turn.
+_TURN_TO_CMD = {0: "FRONT", 90: "LEFT", 180: "BACK", 270: "RIGHT"}
+_TURN_COST = {"FRONT": 0, "LEFT": 1, "RIGHT": 1, "BACK": 2}
+
+
+def _in_bounds(r, c):
+    return 0 <= r < MAZE_ROWS and 0 <= c < MAZE_COLS
+
+
+def _opposite(bit):
+    """N<->S, E<->W wall bit."""
+    return ((bit << 2) | (bit >> 2)) & 0xF
+
+
+def _neighbors(cell):
+    """Reachable neighbour cells (wall must be open on BOTH sides, so a
+    one-sided wall in the data is still respected)."""
+    r, c = cell
+    for _yaw, (dr, dc, bit) in HEADING_DELTA.items():
+        nr, nc = r + dr, c + dc
+        if not _in_bounds(nr, nc):
+            continue
+        if WALLS[r][c] & bit:
+            continue
+        if WALLS[nr][nc] & _opposite(bit):
+            continue
+        yield (nr, nc)
+
+
+def _heuristic(a, b):
+    """Manhattan distance -- admissible on a 4-connected grid."""
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _astar(start, goal):
+    """A* on the maze grid. Returns [start, ..., goal] or None."""
+    if start == goal:
+        return [start]
+    open_heap = [(_heuristic(start, goal), 0, start)]   # (f, g, cell)
+    came_from = {}
+    best_g = {start: 0}
+    while open_heap:
+        _f, g, cur = heapq.heappop(open_heap)
+        if cur == goal:
+            path = [cur]
+            while cur in came_from:
+                cur = came_from[cur]
+                path.append(cur)
+            path.reverse()
+            return path
+        if g > best_g.get(cur, float("inf")):
+            continue                                    # stale heap entry
+        for nb in _neighbors(cur):
+            ng = g + 1
+            if ng < best_g.get(nb, float("inf")):
+                best_g[nb] = ng
+                came_from[nb] = cur
+                heapq.heappush(open_heap, (ng + _heuristic(nb, goal), ng, nb))
+    return None
+
+
+def _yaw_to_neighbor(cell, nxt):
+    """Absolute yaw needed to step from cell to the adjacent cell nxt."""
+    dr, dc = nxt[0] - cell[0], nxt[1] - cell[1]
+    for yaw, (ddr, ddc, _bit) in HEADING_DELTA.items():
+        if (dr, dc) == (ddr, ddc):
+            return yaw
+    return None
+
+
+def _relative_cmd(current_yaw, desired_yaw):
+    turn = int(round((desired_yaw - current_yaw) % 360.0)) % 360
+    return _TURN_TO_CMD[turn]
+
+
 def choose_command(pacbot_cell, pacbot_yaw, pellets_remaining):
     """FRONT/LEFT/RIGHT/BACK to send now, or None. pacbot_cell=(row,col),
     pacbot_yaw one of HEADING_DELTA's keys, pellets_remaining=set of
-    (row,col). Implement this -- see EXIT_CELLS above for the 2 exits."""
-    return None
+    (row,col). Strategy: repeatedly A* to the nearest remaining pellet,
+    and once none are left, A* to the nearest exit and leave through it.
+    Stateless: it is re-run after every pose ack, so it works whether a
+    LEFT/RIGHT/BACK command turns-and-moves or only turns."""
+    cell = (int(pacbot_cell[0]), int(pacbot_cell[1]))
+    if not _in_bounds(*cell):
+        return None                                     # already outside
+
+    # snap yaw to the nearest multiple of 90 (guards against float noise)
+    yaw = (round(float(pacbot_yaw) / 90.0) * 90.0) % 360.0
+
+    # the pellet under the bot is collected on arrival
+    targets = [p for p in pellets_remaining if tuple(p) != cell]
+
+    desired_yaw = None
+
+    if targets:
+        # ---- phase 1: nearest pellet by real path length -----------------
+        best_path, best_key = None, None
+        for p in targets:
+            path = _astar(cell, tuple(p))
+            if path is None or len(path) < 2:
+                continue
+            first_cmd = _relative_cmd(yaw, _yaw_to_neighbor(cell, path[1]))
+            key = (len(path), _TURN_COST[first_cmd])    # tie-break: fewer turns
+            if best_key is None or key < best_key:
+                best_key, best_path = key, path
+        if best_path is not None:
+            desired_yaw = _yaw_to_neighbor(cell, best_path[1])
+
+    if desired_yaw is None and not targets:
+        # ---- phase 2: head for the closest exit and walk out -------------
+        best_exit, best_path, best_key = None, None, None
+        for (er, ec, facing) in EXIT_CELLS:
+            path = _astar(cell, (er, ec))
+            if path is None:
+                continue
+            key = len(path)
+            if best_key is None or key < best_key:
+                best_key, best_exit, best_path = key, (er, ec, facing), path
+        if best_exit is not None:
+            if len(best_path) == 1:                     # standing on the exit cell
+                desired_yaw = _EXIT_YAW[best_exit[2]]   # step out through the gap
+            else:
+                desired_yaw = _yaw_to_neighbor(cell, best_path[1])
+
+    if desired_yaw is None:
+        return None
+    return _relative_cmd(yaw, desired_yaw)
 # ============================================================================
 
 
@@ -165,3 +293,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
